@@ -4,31 +4,50 @@ from flask_bcrypt import Bcrypt
 from flask_jwt_extended import JWTManager
 from flask_jwt_extended import create_access_token
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from flask_migrate import Migrate  # ✅ Import this
+from flask_migrate import Migrate  
 from flask import Flask, request, render_template, redirect, url_for, flash, session
 from sqlalchemy.schema import UniqueConstraint
-
+from flask_mail import Mail, Message
+from itsdangerous import URLSafeTimedSerializer
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
-app.config['JWT_SECRET_KEY'] = 'super-secret-key'  # change this in real apps!
+app.config['JWT_SECRET_KEY'] = 'super-secret-key'  
 
 
 
 jwt = JWTManager(app)
 bcrypt = Bcrypt(app)
 db = SQLAlchemy(app)
-migrate = Migrate(app, db)  # ✅ Add this line
+migrate = Migrate(app, db)  
 
 
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = 'your_email@gmail.com'
+app.config['MAIL_PASSWORD'] = 'your_app_password'  
+app.config['MAIL_DEFAULT_SENDER'] = 'your_email@gmail.com'
+mail = Mail(app)
 
+s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
+def generate_confirmation_token(email):
+    return s.dumps(email, salt='email-confirm')
+
+def confirm_token(token, expiration=3600):  # 1 hour expiry
+    try:
+        email = s.loads(token, salt='email-confirm', max_age=expiration)
+    except:
+        return False
+    return email
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=True)  # ✅ Added email
-    
+    email = db.Column(db.String(120), unique=True, nullable=False)  # ✅ Added email
+    confirmed = db.Column(db.Boolean, default=False)  # ✅ Email confirmation status
+
     __table_args__ = (
         UniqueConstraint('email', name='uq_user_email'),
     )
@@ -82,13 +101,16 @@ def register():
     try:
         db.session.add(new_user)
         db.session.commit()
+        token = generate_confirmation_token(email)
+        confirm_url = url_for('confirm_email', token=token, _external=True)
     except IntegrityError:
         db.session.rollback()
         return jsonify({"error": "Username or email already exists."}), 400
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
-    return jsonify({"message": "User registered successfully."}), 201
+    return jsonify({"message": "Registration successful. Please check your email to confirm your account."}
+), 201
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -113,6 +135,20 @@ def logout():
     flash('You have been logged out.', 'success')
     return redirect(url_for('login'))
 
+@app.route('/confirm/<token>')
+def confirm_email(token):
+    try:
+        email = confirm_token(token)
+    except:
+        return jsonify({"error": "The confirmation link is invalid or has expired."}), 400
+    user = User.query.filter_by(email=email).first_or_404()
+    if user.confirmed:
+        return jsonify({"message": "Account already confirmed. Please login."}), 200
+    else:
+        user.confirmed = True
+        db.session.add(user)
+        db.session.commit()
+        return jsonify({"message": "You have confirmed your account. Thanks!"}), 200
 
 @app.route('/posts', methods=['GET', 'POST'])
 @jwt_required()
